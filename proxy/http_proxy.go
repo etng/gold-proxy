@@ -38,13 +38,14 @@ type HTTPProxyServer struct {
 	NonProxyHandler http.Handler
 	Logger          *log.Logger
 	Tr              *http.Transport
-	GetProxyURL     func() string
-	Verbose         bool
-	PeekHTTPS       bool
-	CACert          []byte
-	CAKey           []byte
-	OnSuccess       func(req *http.Request, resp *http.Response)
-	OnFail          func(cate string, req *http.Request, resp *http.Response)
+	GetProxyURL     func(r *http.Request) string
+
+	Verbose   bool
+	PeekHTTPS bool
+	CACert    []byte
+	CAKey     []byte
+	OnSuccess func(req *http.Request, resp *http.Response)
+	OnFail    func(cate string, req *http.Request, resp *http.Response)
 }
 
 func StartHTTPProxyServer(host string, options ...HTTPProxyServerOpt) {
@@ -64,7 +65,7 @@ func NewHTTPProxyServer(optFuncs ...HTTPProxyServerOpt) *HTTPProxyServer {
 		OnFail:    func(cate string, req *http.Request, resp *http.Response) {},
 	}
 	server.Tr.Proxy = func(r *http.Request) (*url.URL, error) {
-		proxyURL := server.GetProxyURL()
+		proxyURL := server.GetProxyURL(r)
 		if proxyURL == "" {
 			return nil, nil
 		}
@@ -374,7 +375,7 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 			}
 		}()
 	} else {
-		upstream := server.GetProxyURL()
+		upstream := server.GetProxyURL(r)
 		serverAgent, err := server.ConnectDial("tcp", host, upstream)
 		if err != nil {
 			http.Error(w, fmt.Errorf("[proxy][https][accept] fail to do request for %s", err).Error(), 500)

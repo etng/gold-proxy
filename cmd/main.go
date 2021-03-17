@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -30,6 +31,10 @@ func DownloadFile(client *http.Client, remoteURI,
 		writer = of
 	}
 	req.Header.Add("User-Agent", "curl/7.68.0")
+	req.Header.Add("via", "gold-proxy-client")
+	req.Header.Add("x-pp-area", "us")
+	req.Header.Add("x-pp-refresh", "0")
+
 	if resp, err := client.Do(req); err != nil {
 		log.Printf("fail to do https request for %s", err)
 	} else {
@@ -50,6 +55,9 @@ func DownloadFile(client *http.Client, remoteURI,
 		// httputil.DumpResponse(resp, true)
 	}
 }
+
+type ProxyGetter func(clientIP, host, areaName, refresh string) (proxyArea string, proxyURI string)
+
 func main() {
 
 	var caCert, _ = ioutil.ReadFile("./server.crt")
@@ -74,12 +82,27 @@ func main() {
 			log.Printf("stats:\n%s", counter.Print())
 		}
 	}()
+
+	var proxyGetter ProxyGetter = func(clientIP, host, areaName, refresh string) (proxyArea string, proxyURI string) {
+		log.Printf("getting proxy for ClientIP:%q, host:%q, area:%q, refresh:%q", clientIP, host, areaName, refresh)
+		proxyArea = "random"
+		proxyURI = "http://localhost:9192"
+		proxyURI = "http://192.168.4.202:9192"
+		log.Printf("got proxy to area:%q, uri:%q", proxyArea, proxyURI)
+		return
+	}
 	go func() {
 		goldProxy.StartHTTPProxyServer("0.0.0.0:9293", func(server *goldProxy.HTTPProxyServer) {
-			server.GetProxyURL = func() string {
-				// return "http://localhost:9192"
-				return "http://192.168.4.202:9192"
+			server.GetProxyURL = func(r *http.Request) string {
+				area := r.Header.Get("X-PP-AREA")
+				refresh := r.Header.Get("X-PP-REFRESH")
+				r.Header.Del("X-PP-AREA")
+				r.Header.Del("X-PP-REFRESH")
+				clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
+				_, pu := proxyGetter(clientIP, r.Host, area, refresh)
+				return pu
 			}
+			server.PeekHTTPS = true
 			server.Verbose = true
 			server.CACert = caCert
 			server.CAKey = caKey
@@ -115,7 +138,7 @@ func main() {
 		"https://golang.org/favicon.ico",
 		"https://www.hoover.org/",
 		"https://navbharattimes.indiatimes.com/photo/msid-81527709,imgsize-123/pic.jpg",
-		"http://www.aljazeera.com/wp-content/uploads/2021/03/riz.jpg",
+		"https://www.aljazeera.com/wp-content/uploads/2021/03/riz.jpg",
 		"https://images.livemint.com/img/2021/03/08/600x338/uber3-kijB--621x414@LiveMint_1615213477687.JPG",
 		"https://assets-news-bcdn.dailyhunt.in/cmd/resize/3600x1890_60/fetchdata16/images/3d/6f/d7/3d6fd7e71d2643fd17d1c396e27600dcaf80cb41234af1b9f74c2c83029029f1.jpg",
 	}
