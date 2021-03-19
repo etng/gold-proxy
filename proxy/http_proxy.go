@@ -286,7 +286,7 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 		host += ":80"
 	}
 	if server.Verbose {
-		// log.Printf("accept to %s", host)
+		log.Printf("accept to %s from %s", host, r.RemoteAddr)
 	}
 	if server.PeekHTTPS {
 		clientAgent.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
@@ -297,10 +297,11 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 		var ca, _ = tls.X509KeyPair(server.CACert, server.CAKey)
 		var cert, _ = signHost(ca, []string{hostname})
 		tlsConfig.Certificates = append(tlsConfig.Certificates, *cert)
+
 		go func() {
 			tlsClientAgent := tls.Server(clientAgent, tlsConfig)
 			if err := tlsClientAgent.Handshake(); err != nil {
-				log.Printf("[proxy][https][mitm] tls handshake error %s", err)
+				log.Printf("[proxy][https][mitm] tls handshake with %s error %s", r.RemoteAddr, err)
 				return
 			}
 			defer tlsClientAgent.Close()
@@ -311,19 +312,16 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 			for !isEof(reader) {
 				if req, err = http.ReadRequest(reader); err != nil {
 					if err == io.EOF {
-						log.Printf("[proxy][https][mitm] https read eof from client")
+						log.Printf("[proxy][https][mitm] https read eof from client %s", r.RemoteAddr)
 					}
 
 					return
 				}
-				// log.Printf("[proxy][https][mitm] remote address compare %q %q", req.RemoteAddr, r.RemoteAddr)
 				req.RemoteAddr = r.RemoteAddr
-				// log.Printf("[proxy][https][mitm] request url %q", req.URL)
 
 				if !httpsRegexp.MatchString(req.URL.String()) {
 					req.URL, err = url.Parse("https://" + r.Host + req.URL.String())
 				}
-				// log.Printf("[proxy][https][mitm] request url modified %q", req.URL)
 				if d, e := httputil.DumpRequest(req, true); e == nil {
 					log.Printf("[proxy][https][mitm][peek] requests is")
 					log.Printf("%s", d)
@@ -338,16 +336,9 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 				} else {
 					server.OnSuccess(req, resp)
 				}
-				// if d, e := httputil.DumpResponse(resp, true); e == nil {
-				// 	log.Printf("response is %s", d)
-				// }
-				// resp.Header.Write(os.Stdout)
-				log.Printf("[proxy][https][mitm][peek] response is")
-				resp.Header.Write(log.Writer())
 				mimeParts := strings.SplitN(strings.Split(resp.Header.Get("Content-type"), ";")[0], "/", 2)
 				var writer io.WriteCloser
 				if mimeParts[0] == "text" {
-					log.Printf("[proxy][https][mitm] response is text %q", resp.Header.Get("Content-type"))
 					writer = tlsClientAgent
 				} else {
 					resp.Header.Set("Transfer-Encoding", "chunked")
@@ -365,7 +356,6 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 				resp.Header.Set("X-MITM-PLAYER", "1.0")
 
 				io.WriteString(tlsClientAgent, "HTTP/1.1"+" "+statusCode+text+"\r\n")
-				// io.WriteString(tlsClientAgent, "response dropped")
 
 				resp.Header.Write(tlsClientAgent)
 				io.WriteString(tlsClientAgent, "\r\n")
@@ -433,6 +423,7 @@ func removeProxyHeaders(r *http.Request) {
 func (server *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if server.Verbose {
 		server.Logger.Printf("handling request to %s from %s", r.URL, r.RemoteAddr)
+		defer server.Logger.Printf("handled request to %s from %s", r.URL, r.RemoteAddr)
 	}
 	if r.Method == "CONNECT" {
 		server.handleHTTPS(w, r)
@@ -444,17 +435,10 @@ func (server *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		var err error
 		var resp *http.Response
 		removeProxyHeaders(r)
-		// reqD, _ := httputil.DumpRequest(r, false)
-		// if server.Verbose {
-		// 	server.Logger.Printf("request is %s", reqD)
-		// }
 		if resp, err = server.Tr.RoundTrip(r); err != nil {
 			http.Error(w, fmt.Errorf("[proxy][http]fail to do request for %s", err).Error(), 500)
+			return
 		}
-		// respD, _ := httputil.DumpResponse(resp, false)
-		// if server.Verbose {
-		// 	server.Logger.Printf("response is %s", respD)
-		// }
 		for k, vs := range resp.Header {
 			w.Header().Del(k)
 			for _, v := range vs {
@@ -464,9 +448,6 @@ func (server *HTTPProxyServer) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
 		resp.Body.Close()
-	}
-	if server.Verbose {
-		server.Logger.Printf("handled request to %s from %s", r.URL, r.RemoteAddr)
 	}
 }
 
