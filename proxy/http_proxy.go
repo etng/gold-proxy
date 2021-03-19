@@ -34,18 +34,21 @@ import (
 	"time"
 )
 
+var Version = "1.0.0"
+
 type HTTPProxyServer struct {
 	NonProxyHandler http.Handler
 	Logger          *log.Logger
 	Tr              *http.Transport
 	GetProxyURL     func(r *http.Request) string
 
-	Verbose   bool
-	PeekHTTPS bool
-	CACert    []byte
-	CAKey     []byte
-	OnSuccess func(req *http.Request, resp *http.Response)
-	OnFail    func(cate string, req *http.Request, resp *http.Response)
+	Verbose    bool
+	PeekHTTPS  bool
+	CACert     []byte
+	CAKey      []byte
+	OnResponse func(req *http.Request, resp *http.Response)
+	OnSuccess  func(req *http.Request, resp *http.Response)
+	OnFail     func(cate string, req *http.Request, resp *http.Response)
 }
 
 func StartHTTPProxyServer(host string, options ...HTTPProxyServerOpt) {
@@ -60,6 +63,11 @@ func NewHTTPProxyServer(optFuncs ...HTTPProxyServerOpt) *HTTPProxyServer {
 		PeekHTTPS: false,
 		Tr: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+		OnResponse: func(req *http.Request, resp *http.Response) {
+			if resp != nil {
+				resp.Header.Add("X-MITM-PLAYER", Version)
+			}
 		},
 		OnSuccess: func(req *http.Request, resp *http.Response) {},
 		OnFail:    func(cate string, req *http.Request, resp *http.Response) {},
@@ -91,17 +99,17 @@ type halfClosable interface {
 	CloseRead() error
 }
 
-func copyAndClose(dst, src halfClosable) {
+func copyAndClose(dst, src halfClosable, logger *log.Logger) {
 	if _, err := io.Copy(dst, src); err != nil {
-		log.Printf("Error copying to client: %s", err)
+		logger.Printf("Error copying to client: %s", err)
 	}
 
 	dst.CloseWrite()
 	src.CloseRead()
 }
-func copyOrWarn(dst io.Writer, src io.Reader, wg *sync.WaitGroup) {
+func copyOrWarn(dst io.Writer, src io.Reader, wg *sync.WaitGroup, logger *log.Logger) {
 	if _, err := io.Copy(dst, src); err != nil {
-		log.Printf("Error copying to client: %s", err)
+		logger.Printf("Error copying to client: %s", err)
 	}
 	wg.Done()
 }
@@ -286,7 +294,7 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 		host += ":80"
 	}
 	if server.Verbose {
-		log.Printf("accept to %s from %s", host, r.RemoteAddr)
+		server.Logger.Printf("accept to %s from %s", host, r.RemoteAddr)
 	}
 	if server.PeekHTTPS {
 		clientAgent.Write([]byte("HTTP/1.0 200 OK\r\n\r\n"))
@@ -301,7 +309,7 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 		go func() {
 			tlsClientAgent := tls.Server(clientAgent, tlsConfig)
 			if err := tlsClientAgent.Handshake(); err != nil {
-				log.Printf("[proxy][https][mitm] tls handshake with %s error %s", r.RemoteAddr, err)
+				server.Logger.Printf("[proxy][https][mitm] tls handshake with %s error %s", r.RemoteAddr, err)
 				return
 			}
 			defer tlsClientAgent.Close()
@@ -312,7 +320,7 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 			for !isEof(reader) {
 				if req, err = http.ReadRequest(reader); err != nil {
 					if err == io.EOF {
-						log.Printf("[proxy][https][mitm] https read eof from client %s", r.RemoteAddr)
+						server.Logger.Printf("[proxy][https][mitm] https read eof from client %s", r.RemoteAddr)
 					}
 
 					return
@@ -322,15 +330,12 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 				if !httpsRegexp.MatchString(req.URL.String()) {
 					req.URL, err = url.Parse("https://" + r.Host + req.URL.String())
 				}
-				if d, e := httputil.DumpRequest(req, true); e == nil {
-					log.Printf("[proxy][https][mitm][peek] requests is")
-					log.Printf("%s", d)
-				}
 				if resp, err = server.Tr.RoundTrip(req); err != nil {
-					log.Printf("[proxy][https][mitm] https req fail %s", err)
+					server.Logger.Printf("[proxy][https][mitm] https req fail %s", err)
 					server.OnFail("bad_net", req, resp)
 					return
 				}
+				server.OnResponse(req, resp)
 				if resp.StatusCode >= 400 {
 					server.OnFail("bad_resp", req, resp)
 				} else {
@@ -353,7 +358,6 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 				}
 				// Force connection close otherwise chrome will keep CONNECT tunnel open forever
 				resp.Header.Set("Connection", "close")
-				resp.Header.Set("X-MITM-PLAYER", "1.0")
 
 				io.WriteString(tlsClientAgent, "HTTP/1.1"+" "+statusCode+text+"\r\n")
 
@@ -376,14 +380,14 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 		serverAgentTCP, serverOK := serverAgent.(halfClosable)
 		clientAgentTCP, clientOK := clientAgent.(halfClosable)
 		if serverOK && clientOK {
-			go copyAndClose(serverAgentTCP, clientAgentTCP)
-			go copyAndClose(clientAgentTCP, serverAgentTCP)
+			go copyAndClose(serverAgentTCP, clientAgentTCP, server.Logger)
+			go copyAndClose(clientAgentTCP, serverAgentTCP, server.Logger)
 		} else {
 			go func() {
 				var wg sync.WaitGroup
 				wg.Add(2)
-				go copyOrWarn(serverAgent, clientAgent, &wg)
-				go copyOrWarn(clientAgent, serverAgent, &wg)
+				go copyOrWarn(serverAgent, clientAgent, &wg, server.Logger)
+				go copyOrWarn(clientAgent, serverAgent, &wg, server.Logger)
 				wg.Wait()
 				clientAgent.Close()
 				serverAgent.Close()

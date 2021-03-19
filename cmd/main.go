@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	goldProxy "github.com/etng/gold-proxy/proxy"
@@ -42,10 +43,6 @@ func DownloadFile(client *http.Client, remoteURI,
 		resp.Header.Write(log.Writer())
 		// log.Printf("encoding %q", resp.Header.Get("Content-Encoding"))
 		defer resp.Body.Close()
-		log.Printf("len: %s", resp.Header.Get("content-length"))
-		log.Printf("te: %s", resp.Header.Get("Transfer-Encoding"))
-
-		log.Printf("mime: %s", resp.Header.Get("content-type"))
 		if resp.Header.Get("Content-Encoding") == "gzip" {
 			reader, _ := gzip.NewReader(resp.Body)
 			io.Copy(writer, reader)
@@ -59,16 +56,19 @@ func DownloadFile(client *http.Client, remoteURI,
 type ProxyGetter func(clientIP, host, areaName, refresh string) (proxyArea string, proxyURI string)
 
 func main() {
-
+	hostname, _ := os.Hostname()
 	var caCert, _ = ioutil.ReadFile("./server.crt")
 
 	var caKey, _ = ioutil.ReadFile("./server.key")
+	var serverPort = 9293
 
 	logFilename := "data/logs/proxy.log"
+	var coreLogger *log.Logger
 	if logFilename != "" {
 		os.MkdirAll(filepath.Dir(logFilename), 0777)
 		if of, e := os.OpenFile(logFilename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666); e == nil {
 			log.SetOutput(of)
+			coreLogger = log.New(of, "[core]", log.LstdFlags)
 		} else {
 			fmt.Printf("fail to open file %s to write log %s", logFilename, e)
 			os.Exit(1)
@@ -92,7 +92,8 @@ func main() {
 		return
 	}
 	go func() {
-		goldProxy.StartHTTPProxyServer("0.0.0.0:9293", func(server *goldProxy.HTTPProxyServer) {
+		fmt.Printf("proxy listen at 0.0.0.0:%d\n", serverPort)
+		goldProxy.StartHTTPProxyServer(fmt.Sprintf("0.0.0.0:%d", serverPort), func(server *goldProxy.HTTPProxyServer) {
 			server.GetProxyURL = func(r *http.Request) string {
 				area := r.Header.Get("X-PP-AREA")
 				refresh := r.Header.Get("X-PP-REFRESH")
@@ -102,10 +103,19 @@ func main() {
 				_, pu := proxyGetter(clientIP, r.Host, area, refresh)
 				return pu
 			}
+			if coreLogger != nil {
+				server.Logger = coreLogger
+			}
 			server.PeekHTTPS = true
 			server.Verbose = true
 			server.CACert = caCert
 			server.CAKey = caKey
+			server.OnResponse = func(req *http.Request, resp *http.Response) {
+				if resp != nil {
+					oldVia := resp.Header.Get("X-VIA")
+					resp.Header.Add("X-VIA", strings.TrimSpace(fmt.Sprintf("%s %s", hostname, oldVia)))
+				}
+			}
 			server.OnSuccess = func(req *http.Request, resp *http.Response) {
 				go counter.Incr(req.Host)
 			}
@@ -121,9 +131,10 @@ func main() {
 			}
 		})
 	}()
+	proxyURL, _ := url.Parse(fmt.Sprintf("http://localhost:%d", serverPort))
+
 	certPool := x509.NewCertPool()
 	certPool.AppendCertsFromPEM(caCert)
-	proxyURL, _ := url.Parse("http://localhost:9293")
 	client := &http.Client{
 		Transport: &http.Transport{
 			Proxy: http.ProxyURL(proxyURL),
