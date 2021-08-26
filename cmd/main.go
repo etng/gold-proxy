@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"crypto/tls"
 	"crypto/x509"
+	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -55,7 +56,11 @@ func DownloadFile(client *http.Client, remoteURI,
 
 type ProxyGetter func(clientIP, host, areaName, refresh string) (proxyArea string, proxyURI string)
 
+var upstream string
+
 func main() {
+	flag.StringVar(&upstream, "upstream", "", "-u")
+	flag.Parse()
 	hostname, _ := os.Hostname()
 	var caCert, _ = ioutil.ReadFile("./server.crt")
 
@@ -86,22 +91,21 @@ func main() {
 	var proxyGetter ProxyGetter = func(clientIP, host, areaName, refresh string) (proxyArea string, proxyURI string) {
 		log.Printf("getting proxy for ClientIP:%q, host:%q, area:%q, refresh:%q", clientIP, host, areaName, refresh)
 		proxyArea = "random"
-		proxyURI = "http://localhost:9192"
-		proxyURI = "http://192.168.4.202:9192"
+		proxyURI = upstream
 		log.Printf("got proxy to area:%q, uri:%q", proxyArea, proxyURI)
 		return
 	}
 	go func() {
 		fmt.Printf("proxy listen at 0.0.0.0:%d\n", serverPort)
 		goldProxy.StartHTTPProxyServer(fmt.Sprintf("0.0.0.0:%d", serverPort), func(server *goldProxy.HTTPProxyServer) {
-			server.GetProxyURL = func(r *http.Request) string {
+			server.GetProxyURL = func(r *http.Request) (policy, uri string) {
 				area := r.Header.Get("X-PP-AREA")
 				refresh := r.Header.Get("X-PP-REFRESH")
 				r.Header.Del("X-PP-AREA")
 				r.Header.Del("X-PP-REFRESH")
 				clientIP, _, _ := net.SplitHostPort(r.RemoteAddr)
 				_, pu := proxyGetter(clientIP, r.Host, area, refresh)
-				return pu
+				return "Proxy", pu
 			}
 			if coreLogger != nil {
 				server.Logger = coreLogger

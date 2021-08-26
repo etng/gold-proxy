@@ -35,12 +35,13 @@ import (
 )
 
 var Version = "1.0.0"
+var errDenied = errors.New("request is denied")
 
 type HTTPProxyServer struct {
 	NonProxyHandler http.Handler
 	Logger          *log.Logger
 	Tr              *http.Transport
-	GetProxyURL     func(r *http.Request) string
+	GetProxyURL     func(r *http.Request) (policy, uri string)
 
 	Verbose    bool
 	PeekHTTPS  bool
@@ -73,7 +74,10 @@ func NewHTTPProxyServer(optFuncs ...HTTPProxyServerOpt) *HTTPProxyServer {
 		OnFail:    func(cate string, req *http.Request, resp *http.Response) {},
 	}
 	server.Tr.Proxy = func(r *http.Request) (*url.URL, error) {
-		proxyURL := server.GetProxyURL(r)
+		policy, proxyURL := server.GetProxyURL(r)
+		if policy == "Deny" {
+			return nil, errDenied
+		}
 		if proxyURL == "" {
 			return nil, nil
 		}
@@ -331,8 +335,10 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 					req.URL, err = url.Parse("https://" + r.Host + req.URL.String())
 				}
 				if resp, err = server.Tr.RoundTrip(req); err != nil {
-					server.Logger.Printf("[proxy][https][mitm] https req fail %s", err)
-					server.OnFail("bad_net", req, resp)
+					if errDenied != err {
+						server.Logger.Printf("[proxy][https][mitm] https req fail %s", err)
+						server.OnFail("bad_net", req, resp)
+					}
 					return
 				}
 				server.OnResponse(req, resp)
@@ -351,11 +357,8 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 					writer = httputil.NewChunkedWriter(tlsClientAgent)
 				}
 
-				text := resp.Status
 				statusCode := strconv.Itoa(resp.StatusCode) + " "
-				if strings.HasPrefix(text, statusCode) {
-					text = text[len(statusCode):]
-				}
+				text := strings.TrimPrefix(resp.Status, statusCode)
 				// Force connection close otherwise chrome will keep CONNECT tunnel open forever
 				resp.Header.Set("Connection", "close")
 
@@ -369,7 +372,11 @@ func (server *HTTPProxyServer) handleHTTPS(w http.ResponseWriter, r *http.Reques
 			}
 		}()
 	} else {
-		upstream := server.GetProxyURL(r)
+		upstream, policy := server.GetProxyURL(r)
+		if policy == "Deny" {
+			http.Error(w, errDenied.Error(), 500)
+			return
+		}
 		serverAgent, err := server.ConnectDial("tcp", host, upstream)
 		if err != nil {
 			http.Error(w, fmt.Errorf("[proxy][https][accept] fail to do request for %s", err).Error(), 500)

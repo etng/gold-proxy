@@ -1,8 +1,9 @@
 PROXY_URL=localhost:9293
+UPSTREAM=http://192.168.4.202:19192
 run:
 	echo > data/logs/proxy.log
 	rm -fr data/tmp/* || echo "no files in tmp"
-	go run cmd/main.go
+	go run cmd/main.go -upstream ${UPSTREAM}
 test:
 	curl -x${PROXY_URL}  https://ip.fm -v
 img:
